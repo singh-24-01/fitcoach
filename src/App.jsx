@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 
 // ==========================================
-// 1. TA CONFIGURATION FIREBASE PERSONNELLE (MISE À JOUR)
+// 1. TA CONFIGURATION FIREBASE PERSONNELLE
 // ==========================================
 const firebaseConfig = {
   apiKey: "AIzaSyByTZ3o9-7f5r72JOB6eRKM7UclANNizlo",
@@ -63,7 +63,16 @@ const SimpleLineChart = ({ data, color = "#4f46e5", height = 150, targetLine = n
 
 export default function App() {
   const [user, setUser] = useState(null);
-  const [profile, setProfile] = useState({ weight: 104, height: 182, name: "Utilisateur", targetWeight: 90, initialWeight: 104, maxCalories: 2200 });
+  const [profile, setProfile] = useState({ 
+    weight: 0, 
+    height: 0, 
+    age: 0,
+    activityLevel: "Modéré",
+    name: "Utilisateur", 
+    targetWeight: 0, 
+    initialWeight: 0, 
+    maxCalories: 0 
+  });
   const [dailyMeals, setDailyMeals] = useState({ Matin: [], Midi: [], Collation: [], Soir: [] });
   const [dailyWater, setDailyWater] = useState(0); 
   const [historyLogs, setHistoryLogs] = useState([]);
@@ -85,16 +94,14 @@ export default function App() {
       if (u) {
         setUser(u);
         loadUserData(u.uid);
-        setLoading(false);
       } else {
         try {
           const result = await signInAnonymously(auth);
           setUser(result.user);
           loadUserData(result.user.uid);
-          setLoading(false);
         } catch (error) {
-          console.error("Détails Erreur Auth:", error.code, error.message);
-          setAuthError("L'authentification a échoué. Vérifie que le mode 'Anonyme' est activé dans la console Firebase (Authentication > Sign-in method).");
+          console.error("Erreur Auth:", error.code);
+          setAuthError("L'authentification a échoué. Activez le mode 'Anonyme' dans Firebase.");
           setLoading(false);
         }
       }
@@ -102,38 +109,47 @@ export default function App() {
     return () => unsubscribe();
   }, [currentDate]);
 
-  const loadUserData = async (uid) => {
-    try {
-      const profDoc = await getDoc(doc(db, 'artifacts', appId, 'users', uid, 'profile', 'main'));
-      if (profDoc.exists()) setProfile(prev => ({ ...prev, ...profDoc.data() }));
+  const loadUserData = (uid) => {
+    // Écoute du profil en TEMPS RÉEL pour éviter les pertes de données
+    const unsubscribeProfile = onSnapshot(doc(db, 'artifacts', appId, 'users', uid, 'profile', 'main'), (snap) => {
+      if (snap.exists()) {
+        setProfile(snap.data());
+      }
+      setLoading(false); // On n'enlève le chargement que quand le profil est là
+    }, (err) => {
+        console.error("Erreur Profil:", err);
+        setLoading(false);
+    });
 
-      onSnapshot(doc(db, 'artifacts', appId, 'users', uid, 'logs', currentDate), (doc) => {
-        if (doc.exists()) {
-          const data = doc.data();
-          setDailyMeals(data.meals || { Matin: [], Midi: [], Collation: [], Soir: [] });
-          setDailyWater(data.water || 0);
-        } else {
-          setDailyMeals({ Matin: [], Midi: [], Collation: [], Soir: [] });
-          setDailyWater(0);
-        }
-      });
+    // Écoute des repas du jour
+    onSnapshot(doc(db, 'artifacts', appId, 'users', uid, 'logs', currentDate), (doc) => {
+      if (doc.exists()) {
+        const data = doc.data();
+        setDailyMeals(data.meals || { Matin: [], Midi: [], Collation: [], Soir: [] });
+        setDailyWater(data.water || 0);
+      } else {
+        setDailyMeals({ Matin: [], Midi: [], Collation: [], Soir: [] });
+        setDailyWater(0);
+      }
+    });
 
-      onSnapshot(collection(db, 'artifacts', appId, 'users', uid, 'logs'), (s) => {
-        setHistoryLogs(s.docs.map(d => ({ date: d.id, ...d.data() })).sort((a,b) => a.date.localeCompare(b.date)));
-      });
+    // Écoute de l'historique
+    onSnapshot(collection(db, 'artifacts', appId, 'users', uid, 'logs'), (s) => {
+      setHistoryLogs(s.docs.map(d => ({ date: d.id, ...d.data() })).sort((a,b) => a.date.localeCompare(b.date)));
+    });
 
-      onSnapshot(collection(db, 'artifacts', appId, 'users', uid, 'weightLogs'), (s) => {
-        setWeightHistory(s.docs.map(d => ({ date: d.id, value: d.data().weight })).sort((a,b) => a.date.localeCompare(b.date)));
-      });
-    } catch (e) {
-      console.error("Erreur chargement Firestore:", e);
-    }
+    // Écoute du poids
+    onSnapshot(collection(db, 'artifacts', appId, 'users', uid, 'weightLogs'), (s) => {
+      setWeightHistory(s.docs.map(d => ({ date: d.id, value: d.data().weight })).sort((a,b) => a.date.localeCompare(b.date)));
+    });
+
+    return () => unsubscribeProfile();
   };
 
   const getDailyTotal = (meals) => Object.values(meals).flat().reduce((acc, curr) => acc + (parseInt(curr.calories) || 0), 0);
   const totalCaloriesToday = getDailyTotal(dailyMeals);
-  const calorieLimit = parseFloat(profile.maxCalories) || 2200;
-  const caloriePercent = (totalCaloriesToday / calorieLimit) * 100;
+  const calorieLimit = parseFloat(profile.maxCalories) || 0;
+  const caloriePercent = calorieLimit > 0 ? (totalCaloriesToday / calorieLimit) * 100 : 0;
 
   const saveDayData = async (meals, water) => {
     if (!user) return;
@@ -144,7 +160,7 @@ export default function App() {
     const updated = { ...dailyMeals };
     updated[time] = [...(updated[time] || []), { id: Date.now(), name, calories: parseInt(calories) || 0 }];
     setDailyMeals(updated);
-    if (user) await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'logs', currentDate), { meals: updated, water: dailyWater, date: currentDate }, { merge: true });
+    if (user) await saveDayData(updated, dailyWater);
     setShowAddModal(null);
   };
 
@@ -152,38 +168,40 @@ export default function App() {
     const updated = { ...dailyMeals };
     updated[time] = updated[time].filter(item => item.id !== id);
     setDailyMeals(updated);
-    if (user) await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'logs', currentDate), { meals: updated, water: dailyWater, date: currentDate }, { merge: true });
+    if (user) await saveDayData(updated, dailyWater);
   };
 
   const updateWater = async (val) => {
     const newVal = Math.max(0, dailyWater + val);
     setDailyWater(newVal);
-    if (user) await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'logs', currentDate), { meals: dailyMeals, water: newVal, date: currentDate }, { merge: true });
+    if (user) await saveDayData(dailyMeals, newVal);
   };
 
   const weightProgress = useMemo(() => {
-    const initial = parseFloat(profile.initialWeight) || 104;
-    const current = parseFloat(profile.weight);
-    const target = parseFloat(profile.targetWeight);
-    if (target >= initial) return { percent: 0, remaining: 0 };
+    const initial = parseFloat(profile.initialWeight) || 0;
+    const current = parseFloat(profile.weight) || 0;
+    const target = parseFloat(profile.targetWeight) || 0;
+    if (initial === 0 || target === 0 || target >= initial) return { percent: 0, remaining: 0 };
     const lost = initial - current;
     const total = initial - target;
     return { percent: Math.round(Math.max(0, Math.min(100, (lost/total)*100))), remaining: Math.max(0, current - target).toFixed(1) };
   }, [profile]);
 
   const generateInsight = async () => {
-    if (insightLoading || !GEMINI_API_KEY) return;
+    if (insightLoading || !GEMINI_API_KEY || totalCaloriesToday === 0) return;
     setInsightLoading(true);
     try {
       const foods = Object.entries(dailyMeals).map(([t, items]) => `${t}: ${items.map(i => i.name + "(" + i.calories + ")").join(', ')}`).join(' | ');
-      const prompt = `Analyse mes repas: ${foods}. Total: ${totalCaloriesToday}/${calorieLimit} kcal. Dis-moi quel repas a été excessif et par quoi le remplacer demain. CONSIGNES: 4 lignes MAX. Expert nutrition. Emojis. **Gras**.`;
+      const prompt = `Utilisateur: ${profile.weight}kg, ${profile.height}cm, ${profile.age}ans. Activité: ${profile.activityLevel}.
+      Repas: ${foods}. Total: ${totalCaloriesToday}/${calorieLimit} kcal. 
+      Donne un verdict pour le repas le plus riche (✅ VALIDÉ, ⚠️ ATTENTION ou ❌ STOP) et un conseil court. CONSIGNES: 3 lignes MAX. Gras obligatoire.`;
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
       });
       const data = await res.json();
-      setGeminiInsight(data.candidates?.[0]?.content?.parts?.[0]?.text || "Prêt pour l'analyse.");
-    } catch (e) { setGeminiInsight("Erreur d'analyse."); } finally { setInsightLoading(false); }
+      setGeminiInsight(data.candidates?.[0]?.content?.parts?.[0]?.text || "Analyse prête.");
+    } catch (e) { setGeminiInsight("Erreur de connexion coach."); } finally { setInsightLoading(false); }
   };
 
   useEffect(() => { if (activeTab === 'analyse' && totalCaloriesToday > 0) generateInsight(); }, [activeTab]);
@@ -193,7 +211,10 @@ export default function App() {
     setGeminiLoading(true);
     try {
       const foodsEaten = Object.entries(dailyMeals).map(([t, items]) => `${t}: ${items.map(i => i.name).join(', ')}`).join(' | ');
-      let systemPrompt = `Coach Expert Sèche (104kg, 1.82m). Aujourd'hui: ${totalCaloriesToday}/${calorieLimit} kcal. Réponds en 4 lignes MAX. Direct. Utilise **gras**.`;
+      let systemPrompt = `Coach Expert Sèche. Profil: ${profile.weight}kg, ${profile.height}cm, ${profile.age}ans. Activité: ${profile.activityLevel}.
+      Aujourd'hui: ${totalCaloriesToday}/${calorieLimit} kcal. Repas: ${foodsEaten}.
+      Réponds en 4 lignes MAX. Direct. Utilise **gras**.`;
+
       let payload = { 
         contents: [{ role: "user", parts: [{ text: prompt || "Fais le point." }] }],
         systemInstruction: { parts: [{ text: systemPrompt }] }
@@ -232,7 +253,7 @@ export default function App() {
     }
   };
 
-  if (loading) return <div className="flex h-screen items-center justify-center bg-slate-50"><Loader2 className="animate-spin text-indigo-600" size={40} /></div>;
+  if (loading) return <div className="flex h-screen items-center justify-center bg-slate-50"><div className="text-center space-y-4"><Loader2 className="animate-spin text-indigo-600 mx-auto" size={40} /><p className="text-[10px] font-black uppercase text-slate-400 tracking-widest animate-pulse">Récupération de tes données...</p></div></div>;
 
   if (authError) return (
     <div className="flex h-screen items-center justify-center bg-red-50 p-6 text-center">
@@ -255,11 +276,13 @@ export default function App() {
       <main className="max-w-md mx-auto p-4 space-y-6">
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-2 duration-300">
+            {/* PROGRESSION */}
             <div className="bg-white border-2 border-slate-100 rounded-3xl p-5 shadow-sm">
               <div className="flex justify-between items-center mb-3"><div className="flex items-center gap-2"><Trophy size={16} className="text-amber-500" /><h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Objectif {profile.targetWeight}kg</h3></div><span className="text-lg font-black text-indigo-600">{weightProgress.percent}%</span></div>
               <div className="w-full bg-slate-100 h-3 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-1000" style={{ width: `${weightProgress.percent}%` }}></div></div>
             </div>
 
+            {/* CALORIES */}
             <div className={`rounded-3xl p-6 text-white shadow-xl transition-all duration-500 relative overflow-hidden ${caloriePercent >= 100 ? 'bg-red-600 animate-pulse' : caloriePercent >= 80 ? 'bg-amber-500' : 'bg-indigo-600'}`}>
               <div className="absolute -right-6 -top-6 opacity-10 rotate-12">{caloriePercent >= 100 ? <AlertTriangle size={120} /> : <Target size={120} />}</div>
               <p className="text-[10px] font-black uppercase tracking-widest mb-1 opacity-80">Calories Aujourd'hui</p>
@@ -267,17 +290,19 @@ export default function App() {
               <div className="mt-4 w-full bg-black/10 rounded-full h-2 overflow-hidden"><div className="h-full bg-white transition-all duration-700" style={{ width: `${Math.min(caloriePercent, 100)}%` }}></div></div>
             </div>
 
+            {/* WATER */}
             <div className="bg-white border rounded-3xl p-5 shadow-sm flex justify-between items-center">
               <div><h3 className="text-[10px] font-black uppercase text-slate-400 mb-1 flex items-center gap-2"><Droplets size={14} className="text-blue-500" /> Eau</h3><div className="flex items-baseline gap-1"><span className="text-3xl font-black">{(dailyWater * 0.25).toFixed(1)}</span><span className="text-xs font-bold text-slate-400 uppercase">Litres</span></div></div>
               <div className="flex gap-1"><button onClick={() => updateWater(-1)} className="w-8 h-8 bg-slate-50 rounded-lg text-slate-400 flex items-center justify-center"><Minus size={16} /></button><button onClick={() => updateWater(1)} className="w-8 h-8 bg-blue-600 rounded-lg text-white flex items-center justify-center"><Plus size={16} /></button></div>
             </div>
 
+            {/* MEALS */}
             {['Matin', 'Midi', 'Collation', 'Soir'].map((time) => (
               <div key={time} className="bg-white border rounded-3xl p-4 shadow-sm space-y-3">
                 <div className="flex justify-between items-center"><h3 className="font-black text-xs uppercase text-slate-800">{time}</h3><span className="text-[10px] font-black text-slate-400">{dailyMeals[time]?.reduce((a,b) => a+(parseInt(b.calories)||0), 0)} kcal</span></div>
                 <div className="space-y-2">
                   {dailyMeals[time]?.map((item) => (
-                    <div key={item.id} className="flex justify-between items-center bg-slate-50 p-3 rounded-2xl border border-slate-100 text-xs"><div className="flex-1"><p className="font-bold text-slate-700">{item.name}</p><p className="text-slate-400">{item.calories} kcal</p></div><button onClick={async () => {const updated = {...dailyMeals}; updated[time] = updated[time].filter(i=>i.id!==item.id); setDailyMeals(updated); if(user) await setDoc(doc(db,'artifacts',appId,'users',user.uid,'logs',currentDate),{meals:updated}, {merge:true})}} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button></div>
+                    <div key={item.id} className="flex justify-between items-center bg-slate-50 p-3 rounded-2xl border border-slate-100 text-xs"><div className="flex-1"><p className="font-bold text-slate-700">{item.name}</p><p className="text-slate-400">{item.calories} kcal</p></div><button onClick={async () => removeFoodItem(time, item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button></div>
                   ))}
                 </div>
                 <div className="flex gap-2">
@@ -296,12 +321,12 @@ export default function App() {
             <div className={`rounded-3xl p-5 text-white shadow-lg relative overflow-hidden transition-colors duration-500 ${caloriePercent >= 100 ? 'bg-red-700' : 'bg-indigo-700'}`}>
               <div className="absolute top-0 right-0 p-4 opacity-10"><ChefHat size={60} /></div>
               <h3 className="text-[10px] font-black uppercase tracking-widest mb-2 flex items-center gap-2"><Lightbulb size={12} className="text-amber-300" /> BILAN GEMINI</h3>
-              {insightLoading ? <div className="flex items-center gap-3 py-2"><Loader2 size={16} className="animate-spin" /><p className="text-xs italic opacity-80">Analyse en cours...</p></div> : <p className="text-sm font-bold leading-relaxed italic">"{geminiInsight || "Ajoute tes repas pour avoir mon avis !"}"</p>}
+              {insightLoading ? <div className="flex items-center gap-3 py-2"><Loader2 size={16} className="animate-spin" /><p className="text-xs italic opacity-80">Analyse en cours...</p></div> : <p className="text-sm font-bold leading-relaxed italic">"{geminiInsight || "Configure ton profil et tes repas pour avoir mon avis !"}"</p>}
             </div>
 
             <div className="bg-white border rounded-3xl p-5 shadow-sm space-y-8">
-              <div><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2"><TrendingUp size={14} className="text-indigo-500" /> Calories</h3><SimpleLineChart data={analysePeriod === '1J' ? (()=>{const s=[{label:'Début',value:0}];let c=0;['Matin','Midi','Collation','Soir'].forEach(t=>(dailyMeals[t]||[]).forEach(i=>{c+=i.calories;s.push({label:i.name.substring(0,8),value:c})}));return s})() : historyLogs.slice(analysePeriod === '7J' ? -7 : -30).map(l => ({ label: l.date.split('-')[2], value: Object.values(l.meals||{}).flat().reduce((a,b)=>a+(parseInt(b.calories)||0),0) }))} color={caloriePercent >= 100 ? "#ef4444" : "#4f46e5"} targetLine={analysePeriod === '1J' ? calorieLimit : null} /></div>
-              <div className="pt-8 border-t"><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2"><Scale size={14} className="text-emerald-500" /> Poids</h3><SimpleLineChart data={weightHistory.slice(analysePeriod === '7J' ? -7 : -30).map(d => ({ label: d.date.split('-')[2], value: d.value }))} color="#10b981" targetLine={parseFloat(profile.targetWeight)} /></div>
+              <div><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2"><TrendingUp size={14} className="text-indigo-500" /> Calories</h3><SimpleLineChart data={analysePeriod === '1J' ? (()=>{const s=[{label:'Début',value:0}];let c=0;['Matin','Midi','Collation','Soir'].forEach(t=>(dailyMeals[t]||[]).forEach(i=>{c+=i.calories;s.push({label:i.name.substring(0,8),value:c})}));return s})() : historyLogs.slice(analysePeriod === '7J' ? -7 : -30).map(l => ({ label: l.date.split('-')[2], value: Object.values(l.meals||{}).flat().reduce((a,b)=>a+(parseInt(b.calories)||0),0) }))} color={caloriePercent >= 100 ? "#ef4444" : "#4f46e5"} targetLine={analysePeriod === '1J' ? (calorieLimit > 0 ? calorieLimit : null) : null} /></div>
+              <div className="pt-8 border-t"><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2"><Scale size={14} className="text-emerald-500" /> Poids</h3><SimpleLineChart data={weightHistory.slice(analysePeriod === '7J' ? -7 : -30).map(d => ({ label: d.date.split('-')[2], value: d.value }))} color="#10b981" targetLine={parseFloat(profile.targetWeight) || null} /></div>
             </div>
           </div>
         )}
@@ -336,12 +361,71 @@ export default function App() {
           <div className="space-y-6 animate-in zoom-in-95">
             <h2 className="text-lg font-black uppercase flex items-center gap-2"><Settings size={20} className="text-indigo-600" /> Profil</h2>
             <div className="bg-white border rounded-3xl p-6 shadow-sm space-y-4">
-              <div className="bg-slate-50 p-3 rounded-2xl border font-bold"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Limite Calories / Jour</label><input type="number" value={profile.maxCalories} onChange={(e) => setProfile({...profile, maxCalories: e.target.value})} className="bg-transparent font-black text-xl text-red-600 outline-none w-full" /></div>
-              <div className="grid grid-cols-2 gap-4 pt-4 border-t"><div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Actuel (kg)</label><input type="number" value={profile.weight} onChange={(e) => setProfile({...profile, weight: e.target.value})} className="bg-transparent font-black text-xl text-indigo-600 outline-none w-full" /></div><div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Cible (kg)</label><input type="number" value={profile.targetWeight} onChange={(e) => setProfile({...profile, targetWeight: e.target.value})} className="bg-transparent font-black text-xl text-red-600 outline-none w-full" /></div></div>
-              <button onClick={async () => {const updated = {...profile, weight:parseFloat(profile.weight), targetWeight:parseFloat(profile.targetWeight), maxCalories:parseInt(profile.maxCalories)}; await setDoc(doc(db,'artifacts',appId,'users',user.uid,'profile','main'),updated); await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weightLogs', currentDate), { weight: updated.weight }); setActiveTab('dashboard');}} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-xs shadow-lg active:scale-95 transition-all">Enregistrer</button>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-slate-50 p-3 rounded-2xl border font-bold">
+                  <label className="text-[8px] font-black text-slate-400 uppercase block mb-1 italic">Limite Kcal / Jour</label>
+                  <input type="number" value={profile.maxCalories} onChange={(e) => setProfile({...profile, maxCalories: e.target.value})} className="bg-transparent font-black text-xl text-red-600 outline-none w-full" />
+                </div>
+                <div className="bg-slate-50 p-3 rounded-2xl border font-bold">
+                  <label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Âge</label>
+                  <input type="number" value={profile.age} onChange={(e) => setProfile({...profile, age: e.target.value})} className="bg-transparent font-black text-xl text-slate-700 outline-none w-full" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 pt-2">
+                <div className="bg-slate-50 p-3 rounded-2xl border">
+                  <label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Actuel (kg)</label>
+                  <input type="number" value={profile.weight} onChange={(e) => setProfile({...profile, weight: e.target.value})} className="bg-transparent font-black text-xl text-indigo-600 outline-none w-full" />
+                </div>
+                <div className="bg-slate-50 p-3 rounded-2xl border">
+                  <label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Taille (cm)</label>
+                  <input type="number" value={profile.height} onChange={(e) => setProfile({...profile, height: e.target.value})} className="bg-transparent font-black text-xl text-slate-700 outline-none w-full" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 pt-2">
+                <div className="bg-slate-50 p-3 rounded-2xl border">
+                  <label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Cible (kg)</label>
+                  <input type="number" value={profile.targetWeight} onChange={(e) => setProfile({...profile, targetWeight: e.target.value})} className="bg-transparent font-black text-xl text-emerald-600 outline-none w-full" />
+                </div>
+                <div className="bg-slate-50 p-3 rounded-2xl border">
+                  <label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Activité</label>
+                  <select 
+                    value={profile.activityLevel} 
+                    onChange={(e) => setProfile({...profile, activityLevel: e.target.value})}
+                    className="bg-transparent font-black text-sm text-slate-700 outline-none w-full mt-1 border-none"
+                  >
+                    <option value="Sédentaire">Sédentaire</option>
+                    <option value="Modéré">Modéré</option>
+                    <option value="Actif">Actif / Sportif</option>
+                  </select>
+                </div>
+              </div>
+
+              <button onClick={async () => {
+                const weightVal = parseFloat(profile.weight);
+                const updated = {
+                  ...profile, 
+                  weight: weightVal, 
+                  height: parseFloat(profile.height), 
+                  age: parseInt(profile.age),
+                  targetWeight: parseFloat(profile.targetWeight), 
+                  maxCalories: parseInt(profile.maxCalories),
+                  initialWeight: profile.initialWeight === 0 ? weightVal : profile.initialWeight
+                };
+                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'main'), updated);
+                await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weightLogs', currentDate), { weight: weightVal });
+                setActiveTab('dashboard');
+              }} className="w-full py-4 mt-2 bg-indigo-600 text-white rounded-3xl font-black uppercase tracking-widest text-xs shadow-lg active:scale-95 transition-all">Enregistrer le Profil</button>
             </div>
           </div>
         )}
+
+        <footer className="mt-8 mb-4 text-center">
+          <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.2em] italic opacity-50">
+            © Sandeep-Singh NIRMAL 2026
+          </p>
+        </footer>
       </main>
 
       <nav className={`fixed bottom-0 left-0 right-0 border-t px-6 py-4 flex justify-between items-end z-40 transition-colors duration-500 shadow-[0_-8px_20px_rgba(0,0,0,0.05)] ${caloriePercent >= 100 ? 'bg-red-50 border-red-100' : 'bg-white border-slate-100'}`}>
