@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 
 // ==========================================
-// 1. TA CONFIGURATION FIREBASE PERSONNELLE
+// 1. CONFIGURATION FIREBASE
 // ==========================================
 const firebaseConfig = {
   apiKey: "AIzaSyByTZ3o9-7f5r72JOB6eRKM7UclANNizlo",
@@ -29,17 +29,16 @@ const appId = "fitcoach-app-v1";
 // ==========================================
 // 2. RÉCUPÉRATION SÉCURISÉE DE LA CLÉ GEMINI
 // ==========================================
-const getSafeApiKey = () => {
+const getGeminiKey = () => {
   try {
-    // Utilisation d'un accès indirect pour contourner l'avertissement de build si nécessaire
-    const env = import.meta.env;
-    return env.VITE_GEMINI_API_KEY || "";
+    // @ts-ignore
+    return import.meta.env.VITE_GEMINI_API_KEY || "";
   } catch (e) {
     return "";
   }
 };
 
-const GEMINI_API_KEY = getSafeApiKey();
+const GEMINI_API_KEY = getGeminiKey();
 
 const FOOD_GUIDE = [
   { cat: "Boulangerie", ban: "Croissants, Pains au chocolat, Brioches, Pain blanc.", replace: "Pain complet, seigle." },
@@ -51,7 +50,7 @@ const FOOD_GUIDE = [
 
 const SimpleLineChart = ({ data, color = "#4f46e5", height = 150, targetLine = null }) => {
   const chartData = data.length === 0 ? [] : (data.length === 1 ? [{label: 'Démarrage', value: 0}, ...data] : data);
-  if (chartData.length < 2) return <div className="h-[150px] flex items-center justify-center bg-slate-50 rounded-xl border border-dashed border-slate-200 text-[10px] text-slate-400 font-black uppercase italic text-center px-4">Ajoute des repas pour voir la courbe</div>;
+  if (chartData.length < 2) return <div className="h-[150px] flex items-center justify-center bg-slate-50 rounded-xl border border-dashed border-slate-200 text-[10px] text-slate-400 font-black uppercase italic text-center px-4 font-bold">Ajoute des repas pour voir la courbe</div>;
   const values = chartData.map(d => d.value);
   if (targetLine !== null) values.push(targetLine);
   const min = Math.min(...values, 0);
@@ -74,7 +73,7 @@ const SimpleLineChart = ({ data, color = "#4f46e5", height = 150, targetLine = n
 export default function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState({ 
-    weight: 0, height: 0, age: 0, activityLevel: "Modéré", 
+    weight: 0, height: 0, age: 0, gender: "Homme", activityLevel: "Modéré", 
     name: "Utilisateur", targetWeight: 0, initialWeight: 0, maxCalories: 0 
   });
   const [dailyMeals, setDailyMeals] = useState({ Matin: [], Midi: [], Collation: [], Soir: [] });
@@ -91,25 +90,28 @@ export default function App() {
   const [geminiLoading, setGeminiLoading] = useState(false);
   const [chatHistory, setChatHistory] = useState([]);
   const [inputMessage, setInputMessage] = useState("");
-  const [authError, setAuthError] = useState(null);
+  const [calculatingIA, setCalculatingIA] = useState(false);
+  const [iaMessage, setIaMessage] = useState("");
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      if (u) {
-        setUser(u);
-        loadUserData(u.uid);
-      } else {
-        try {
-          const result = await signInAnonymously(auth);
-          setUser(result.user);
-          loadUserData(result.user.uid);
-        } catch (error) {
-          setAuthError("Erreur d'authentification Firebase.");
-          setLoading(false);
-        }
+    const initAuth = async () => {
+      try {
+        const unsubscribe = onAuthStateChanged(auth, async (u) => {
+          if (u) {
+            setUser(u);
+            loadUserData(u.uid);
+          } else {
+            const result = await signInAnonymously(auth);
+            setUser(result.user);
+            loadUserData(result.user.uid);
+          }
+        });
+        return unsubscribe;
+      } catch (error) {
+        setLoading(false);
       }
-    });
-    return () => unsubscribe();
+    };
+    initAuth();
   }, [currentDate]);
 
   const loadUserData = (uid) => {
@@ -118,9 +120,9 @@ export default function App() {
       setLoading(false);
     });
 
-    onSnapshot(doc(db, 'artifacts', appId, 'users', uid, 'logs', currentDate), (doc) => {
-      if (doc.exists()) {
-        const data = doc.data();
+    onSnapshot(doc(db, 'artifacts', appId, 'users', uid, 'logs', currentDate), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
         setDailyMeals(data.meals || { Matin: [], Midi: [], Collation: [], Soir: [] });
         setDailyWater(data.water || 0);
       } else {
@@ -181,41 +183,75 @@ export default function App() {
     return { percent: Math.round(Math.max(0, Math.min(100, (lost/total)*100))), remaining: Math.max(0, current - target).toFixed(1) };
   }, [profile]);
 
-  const callGemini = async (prompt, imageBase64 = null, isLogging = false) => {
-    if (!GEMINI_API_KEY) return "Veuillez configurer ta clé API VITE_GEMINI_API_KEY sur Vercel (puis faire un Redeploy).";
-    setGeminiLoading(true);
+  // --- LOGIQUE GEMINI SÉCURISÉE ---
+  const callGemini = async (prompt, systemInstruction, responseMimeType = "text/plain") => {
+    if (!GEMINI_API_KEY) return "Erreur : Clé API manquante sur Vercel.";
+    
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }],
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      generationConfig: { responseMimeType }
+    };
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) throw new Error("IA indisponible");
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text;
+  };
+
+  // --- CALCULATEUR DE PROFIL IA ---
+  const calculateIA = async () => {
+    if (!profile.weight || !profile.height || !profile.age) {
+      setIaMessage("Remplis d'abord ton Poids, Taille et Âge !");
+      return;
+    }
+    setCalculatingIA(true);
+    setIaMessage("");
     try {
-      const foodsEaten = Object.entries(dailyMeals).map(([t, items]) => `${t}: ${items.map(i => i.name).join(', ')}`).join(' | ');
-      const profilInfo = profile.weight > 0 ? `${profile.weight}kg, ${profile.height}cm, ${profile.age}ans` : "104kg, 1.82m";
-      let systemInstruction = `Coach Expert Sèche. Profil: ${profilInfo}. Aujourd'hui: ${totalCaloriesToday}/${calorieLimit} kcal. 
-      RÈGLES: Réponds en 4 lignes MAX. Direct. Utilise le **gras**.
-      VERDICTS OBLIGATOIRES: '✅ VALIDÉ', '⚠️ ATTENTION', ou '❌ STOP'.`;
-
-      let payload = { 
-        contents: [{ role: "user", parts: [{ text: prompt || "Fais le point." }] }],
-        systemInstruction: { parts: [{ text: systemInstruction }] }
-      };
-
-      if (imageBase64) {
-        if (isLogging) {
-          payload.contents[0].parts = [{ text: "JSON ONLY: {\"name\": \"...\", \"calories\": 000}" }, { inlineData: { mimeType: "image/png", data: imageBase64 } }];
-          payload.generationConfig = { responseMimeType: "application/json" };
-        } else {
-          payload.contents[0].parts = [{ text: "Analyse plat. Verdict: ✅ VALIDÉ, ⚠️ ATTENTION ou ❌ STOP. Bref." }, { inlineData: { mimeType: "image/png", data: imageBase64 } }];
-        }
-      }
-
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`, { 
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
-      });
-      const data = await res.json();
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) throw new Error("IA muette.");
-      if (isLogging) return JSON.parse(text);
-      return text;
+      const prompt = `Analyse mon profil : ${profile.gender}, ${profile.weight}kg, ${profile.height}cm, ${profile.age}ans, Activité: ${profile.activityLevel}.
+      1. Calcule mon métabolisme de base (BMR).
+      2. Défini ma limite calorique pour une sèche agressive (environ -1kg/semaine).
+      3. Suggère un objectif de poids cible réaliste.
+      Retourne UNIQUEMENT un JSON: {"bmr": 0, "daily_limit": 0, "suggested_target": 0, "msg": "courte motivation"}`;
+      
+      const res = await callGemini(prompt, "Tu es un expert en nutrition. Réponds uniquement en JSON.", "application/json");
+      const data = JSON.parse(res);
+      
+      setProfile(prev => ({ 
+        ...prev, 
+        maxCalories: data.daily_limit,
+        targetWeight: data.suggested_target
+      }));
+      setIaMessage(`✅ Calculé ! Métabolisme: ${data.bmr}kcal. ${data.msg}`);
     } catch (e) {
-      console.error(e);
-      return "Le coach AI rencontre un problème technique. Vérifie ta clé sur Vercel.";
+      setIaMessage("❌ Erreur lors du calcul IA.");
+    } finally {
+      setCalculatingIA(false);
+    }
+  };
+
+  const handleCoachChat = async () => {
+    if (!inputMessage.trim()) return;
+    const msg = inputMessage;
+    setInputMessage("");
+    setChatHistory(p => [...p, { role: 'user', text: msg }]);
+    setGeminiLoading(true);
+
+    try {
+      const p = profile;
+      const profilText = p.weight > 0 ? `${p.gender}, ${p.weight}kg, ${p.height}cm, ${p.age}ans, ${p.activityLevel}` : "Profil non rempli";
+      const system = `Coach Expert Sèche. Profil: ${profilText}. Cal Auj: ${totalCaloriesToday}/${calorieLimit}. 
+      RÈGLES: 4 lignes MAX. Direct. Utilise le **gras**. VERDICTS: ✅ VALIDÉ, ⚠️ ATTENTION ou ❌ STOP.`;
+      
+      const res = await callGemini(msg, system);
+      setChatHistory(p => [...p, { role: 'model', text: res }]);
+    } catch (e) {
+      setChatHistory(p => [...p, { role: 'model', text: "Erreur Coach." }]);
     } finally {
       setGeminiLoading(false);
     }
@@ -225,34 +261,17 @@ export default function App() {
     if (insightLoading || !GEMINI_API_KEY || totalCaloriesToday === 0) return;
     setInsightLoading(true);
     try {
-      const resText = await callGemini(`Analyse mes repas du jour et donne-moi un verdict global et un conseil.`);
-      setGeminiInsight(resText);
+      const p = profile;
+      const profilText = p.weight > 0 ? `${p.gender}, ${p.weight}kg, ${p.height}cm, ${p.age}ans` : "Inconnu";
+      const system = `Expert Sèche. Profil: ${profilText}. Cal: ${totalCaloriesToday}/${calorieLimit}.`;
+      const res = await callGemini("Analyse mes repas du jour et donne-moi un verdict global et un conseil stratégique.", system);
+      setGeminiInsight(res);
     } catch (e) { setGeminiInsight("Analyse indisponible."); } finally { setInsightLoading(false); }
   };
 
   useEffect(() => { if (activeTab === 'analyse' && totalCaloriesToday > 0) generateInsight(); }, [activeTab]);
 
-  const handleImageUpload = (e, targetTime = null) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = reader.result.split(',')[1];
-        if (targetTime) {
-          const res = await callGemini("", base64, true);
-          if (res) addFoodItem(targetTime, res.name, res.calories);
-        } else {
-          setChatHistory(p => [...p, { role: 'user', text: "[Photo envoyée]" }]);
-          const res = await callGemini("Analyse mon repas.", base64);
-          setChatHistory(p => [...p, { role: 'model', text: res }]);
-          setActiveTab('gemini');
-        }
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  if (loading) return <div className="flex h-screen items-center justify-center bg-slate-50"><div className="text-center space-y-4"><Loader2 className="animate-spin text-indigo-600 mx-auto" size={40} /><p className="text-[10px] font-black uppercase text-slate-400 tracking-widest animate-pulse">Synchronisation...</p></div></div>;
+  if (loading) return <div className="flex h-screen items-center justify-center bg-slate-50"><div className="text-center space-y-4"><Loader2 className="animate-spin text-indigo-600 mx-auto" size={40} /><p className="text-[10px] font-black uppercase text-slate-400 tracking-widest animate-pulse">Chargement intelligent...</p></div></div>;
 
   return (
     <div className={`min-h-screen transition-all duration-700 pb-28 font-sans ${caloriePercent >= 100 ? 'bg-red-50' : 'bg-slate-50'}`}>
@@ -264,27 +283,26 @@ export default function App() {
       <main className="max-w-md mx-auto p-4 space-y-6">
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-2 duration-300">
-            <div className="bg-white border-2 border-slate-100 rounded-3xl p-5 shadow-sm">
-              <div className="flex justify-between items-center mb-3"><div className="flex items-center gap-2"><Trophy size={16} className="text-amber-500" /><h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Objectif {profile.targetWeight}kg</h3></div><span className="text-lg font-black text-indigo-600">{weightProgress.percent}%</span></div>
+            <div className="bg-white border-2 border-slate-100 rounded-3xl p-5 shadow-sm font-bold">
+              <div className="flex justify-between items-center mb-3 font-bold"><div className="flex items-center gap-2"><Trophy size={16} className="text-amber-500" /><h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Objectif {profile.targetWeight}kg</h3></div><span className="text-lg font-black text-indigo-600">{weightProgress.percent}%</span></div>
               <div className="w-full bg-slate-100 h-3 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-1000" style={{ width: `${weightProgress.percent}%` }}></div></div>
             </div>
             <div className={`rounded-3xl p-6 text-white shadow-xl transition-all duration-500 relative overflow-hidden ${caloriePercent >= 100 ? 'bg-red-600 animate-pulse' : caloriePercent >= 80 ? 'bg-amber-500' : 'bg-indigo-600'}`}>
-              <div className="absolute -right-6 -top-6 opacity-10 rotate-12">{caloriePercent >= 100 ? <AlertTriangle size={120} /> : <Target size={120} />}</div>
+              <div className="absolute -right-6 -top-6 opacity-10 rotate-12"><Target size={120} /></div>
               <p className="text-[10px] font-black uppercase tracking-widest mb-1 opacity-80">Calories Aujourd'hui</p>
-              <div className="flex items-baseline gap-1"><span className="text-5xl font-black">{totalCaloriesToday}</span><span className="text-lg opacity-70 font-bold">/ {calorieLimit} kcal</span></div>
+              <div className="flex items-baseline gap-1 font-bold"><span className="text-5xl font-black">{totalCaloriesToday}</span><span className="text-lg opacity-70 font-bold">/ {calorieLimit} kcal</span></div>
               <div className="mt-4 w-full bg-black/10 rounded-full h-2 overflow-hidden"><div className="h-full bg-white transition-all duration-700" style={{ width: `${Math.min(caloriePercent, 100)}%` }}></div></div>
             </div>
             {['Matin', 'Midi', 'Collation', 'Soir'].map((time) => (
-              <div key={time} className="bg-white border rounded-3xl p-4 shadow-sm space-y-3">
+              <div key={time} className="bg-white border rounded-3xl p-4 shadow-sm space-y-3 font-bold">
                 <div className="flex justify-between items-center"><h3 className="font-black text-xs uppercase text-slate-800">{time}</h3><span className="text-[10px] font-black text-slate-400">{dailyMeals[time]?.reduce((a,b) => a+(parseInt(b.calories)||0), 0)} kcal</span></div>
                 <div className="space-y-2">
                   {dailyMeals[time]?.map((item) => (
-                    <div key={item.id} className="flex justify-between items-center bg-slate-50 p-3 rounded-2xl border border-slate-100 text-xs font-bold"><div className="flex-1 text-slate-700"><p>{item.name}</p><p className="text-[10px] opacity-50">{item.calories} kcal</p></div><button onClick={() => removeFoodItem(time, item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button></div>
+                    <div key={item.id} className="flex justify-between items-center bg-slate-50 p-3 rounded-2xl border border-slate-100 text-xs font-bold font-bold"><div className="flex-1 font-bold"><p className="text-slate-700">{item.name}</p><p className="text-[10px] opacity-50 font-bold">{item.calories} kcal</p></div><button onClick={() => removeFoodItem(time, item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button></div>
                   ))}
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => setShowAddModal(time)} className="flex-1 py-2 bg-slate-50 border-2 border-dashed border-slate-100 rounded-2xl text-[10px] font-black text-slate-400 uppercase flex items-center justify-center gap-1 hover:text-indigo-600 transition-colors"><Plus size={14} /> Ajouter</button>
-                  <label className="w-12 h-10 bg-indigo-50 border-2 border-dashed border-indigo-100 rounded-2xl flex items-center justify-center text-indigo-400 cursor-pointer"><Camera size={18} /><input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e, time)} /></label>
+                  <button onClick={() => setShowAddModal(time)} className="flex-1 py-2 bg-slate-50 border-2 border-dashed border-slate-100 rounded-2xl text-[10px] font-black text-slate-400 uppercase flex items-center justify-center gap-1 hover:text-indigo-600 transition-colors font-bold"><Plus size={14} /> Ajouter</button>
                 </div>
               </div>
             ))}
@@ -292,29 +310,29 @@ export default function App() {
         )}
 
         {activeTab === 'analyse' && (
-          <div className="space-y-6 animate-in fade-in">
-            <div className="flex justify-between items-center"><h2 className="text-lg font-black uppercase flex items-center gap-2"><ChartIcon size={20} className="text-indigo-600" /> Analyse</h2><div className="bg-white p-1 rounded-xl border flex gap-1 shadow-sm">{['1J', '7J', '1M'].map(p => (<button key={p} onClick={() => setAnalysePeriod(p)} className={`px-3 py-1 rounded-lg text-[10px] font-black transition-all ${analysePeriod === p ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>{p}</button>))}</div></div>
-            <div className={`rounded-3xl p-5 text-white shadow-lg relative overflow-hidden transition-colors duration-500 ${caloriePercent >= 100 ? 'bg-red-700' : 'bg-indigo-700'}`}>
+          <div className="space-y-6 animate-in fade-in font-bold">
+            <div className="flex justify-between items-center"><h2 className="text-lg font-black uppercase flex items-center gap-2"><ChartIcon size={20} className="text-indigo-600" /> Analyse</h2><div className="bg-white p-1 rounded-xl border flex gap-1 shadow-sm font-bold">{['1J', '7J', '1M'].map(p => (<button key={p} onClick={() => setAnalysePeriod(p)} className={`px-3 py-1 rounded-lg text-[10px] font-black transition-all font-bold ${analysePeriod === p ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400'}`}>{p}</button>))}</div></div>
+            <div className={`rounded-3xl p-5 text-white shadow-lg relative overflow-hidden transition-colors duration-500 font-bold ${caloriePercent >= 100 ? 'bg-red-700' : 'bg-indigo-700'}`}>
               <div className="absolute top-0 right-0 p-4 opacity-10"><ChefHat size={60} /></div>
-              <h3 className="text-[10px] font-black uppercase mb-2 flex items-center gap-2"><Lightbulb size={12} className="text-amber-300" /> BILAN DU COACH</h3>
-              {insightLoading ? <div className="flex items-center gap-3 py-2"><Loader2 size={16} className="animate-spin text-amber-300" /><p className="text-xs italic opacity-80">Analyse...</p></div> : <p className="text-sm font-bold leading-relaxed italic">"{geminiInsight || "Configure ton profil et tes repas !"}"</p>}
+              <h3 className="text-[10px] font-black uppercase mb-2 flex items-center gap-2 font-bold"><Lightbulb size={12} className="text-amber-300" /> BILAN DU COACH</h3>
+              {insightLoading ? <div className="flex items-center gap-3 py-2 font-bold"><Loader2 size={16} className="animate-spin text-amber-300" /><p className="text-xs italic opacity-80 font-bold font-bold">Analyse...</p></div> : <p className="text-sm font-bold leading-relaxed italic">"{geminiInsight || "Configure ton profil et tes repas !"}"</p>}
             </div>
-            <div className="bg-white border rounded-3xl p-5 shadow-sm space-y-8">
-              <div><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2"><TrendingUp size={14} className="text-indigo-500" /> Calories</h3><SimpleLineChart data={analysePeriod === '1J' ? (()=>{const s=[{label:'Début',value:0}];let c=0;['Matin','Midi','Collation','Soir'].forEach(t=>(dailyMeals[t]||[]).forEach(i=>{c+=i.calories;s.push({label:i.name.substring(0,8),value:c})}));return s})() : historyLogs.slice(analysePeriod === '7J' ? -7 : -30).map(l => ({ label: l.date.split('-')[2], value: Object.values(l.meals||{}).flat().reduce((a,b)=>a+(parseInt(b.calories)||0),0) }))} color={caloriePercent >= 100 ? "#ef4444" : "#4f46e5"} targetLine={analysePeriod === '1J' ? (calorieLimit > 0 ? calorieLimit : null) : null} /></div>
-              <div className="pt-8 border-t"><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2"><Scale size={14} className="text-emerald-500" /> Poids</h3><SimpleLineChart data={weightHistory.slice(analysePeriod === '7J' ? -7 : -30).map(d => ({ label: d.date.split('-')[2], value: d.value }))} color="#10b981" targetLine={parseFloat(profile.targetWeight) || null} /></div>
+            <div className="bg-white border rounded-3xl p-5 shadow-sm space-y-8 font-bold font-bold">
+              <div><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2 font-bold font-bold font-bold"><TrendingUp size={14} className="text-indigo-500" /> Calories</h3><SimpleLineChart data={analysePeriod === '1J' ? (()=>{const s=[{label:'Début',value:0}];let c=0;['Matin','Midi','Collation','Soir'].forEach(t=>(dailyMeals[t]||[]).forEach(i=>{c+=i.calories;s.push({label:i.name.substring(0,8),value:c})}));return s})() : historyLogs.slice(analysePeriod === '7J' ? -7 : -30).map(l => ({ label: l.date.split('-')[2], value: Object.values(l.meals||{}).flat().reduce((a,b)=>a+(parseInt(b.calories)||0),0) }))} color={caloriePercent >= 100 ? "#ef4444" : "#4f46e5"} targetLine={analysePeriod === '1J' ? (calorieLimit > 0 ? calorieLimit : null) : null} /></div>
+              <div className="pt-8 border-t font-bold font-bold font-bold"><h3 className="text-[10px] font-black uppercase text-slate-400 mb-4 flex items-center gap-2 font-bold font-bold font-bold"><Scale size={14} className="text-emerald-500" /> Poids</h3><SimpleLineChart data={weightHistory.slice(analysePeriod === '7J' ? -7 : -30).map(d => ({ label: d.date.split('-')[2], value: d.value }))} color="#10b981" targetLine={parseFloat(profile.targetWeight) || null} /></div>
             </div>
           </div>
         )}
 
         {activeTab === 'guide' && (
-          <div className="space-y-4 animate-in fade-in">
+          <div className="space-y-4 animate-in fade-in font-bold font-bold">
             <h2 className="text-lg font-black uppercase flex items-center gap-2"><Search size={20} className="text-indigo-600" /> Guide de Survie</h2>
             {FOOD_GUIDE.map((item, i) => (
-              <div key={i} className="bg-white border rounded-3xl p-5 shadow-sm">
-                <h3 className="font-black text-indigo-700 text-xs uppercase mb-3 flex items-center gap-2"><span className="w-1.5 h-4 bg-indigo-600 rounded-full"></span> {item.cat}</h3>
-                <div className="space-y-3">
-                  <div className="bg-red-50 p-3 rounded-2xl border border-red-100 text-[11px] text-red-900 leading-tight font-bold"><span className="font-black text-[9px] text-red-700 block mb-1 uppercase">❌ STOP</span>{item.ban}</div>
-                  <div className="bg-emerald-50 p-3 rounded-2xl border border-emerald-100 text-[11px] text-emerald-900 leading-tight font-bold"><span className="font-black text-[9px] text-emerald-700 block mb-1 uppercase">✅ GO</span>{item.replace}</div>
+              <div key={i} className="bg-white border rounded-3xl p-5 shadow-sm font-bold font-bold">
+                <h3 className="font-black text-indigo-700 text-xs uppercase mb-3 flex items-center gap-2 font-bold"><span className="w-1.5 h-4 bg-indigo-600 rounded-full font-bold"></span> {item.cat}</h3>
+                <div className="space-y-3 font-bold font-bold">
+                  <div className="bg-red-50 p-3 rounded-2xl border border-red-100 text-[11px] text-red-900 leading-tight font-bold font-bold font-bold"><span className="font-black text-[9px] text-red-700 block mb-1 uppercase font-bold">❌ STOP</span>{item.ban}</div>
+                  <div className="bg-emerald-50 p-3 rounded-2xl border border-emerald-100 text-[11px] text-emerald-900 leading-tight font-bold font-bold font-bold"><span className="font-black text-[9px] text-emerald-700 block mb-1 uppercase font-bold">✅ GO</span>{item.replace}</div>
                 </div>
               </div>
             ))}
@@ -322,56 +340,85 @@ export default function App() {
         )}
 
         {activeTab === 'gemini' && (
-          <div className="space-y-4 flex flex-col h-[70vh]">
+          <div className="space-y-4 flex flex-col h-[70vh] font-bold font-bold">
             <h2 className="text-lg font-black uppercase flex items-center gap-2"><MessageSquare size={20} className="text-indigo-600" /> Coach AI</h2>
-            <div className="flex-1 bg-white border rounded-3xl p-4 shadow-inner overflow-y-auto space-y-4">
-              {chatHistory.map((msg, i) => (<div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[85%] p-3 rounded-2xl text-xs font-bold ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none shadow-md' : 'bg-slate-100 border text-slate-800 rounded-tl-none'}`}>{msg.text}</div></div>))}
-              {geminiLoading && <div className="flex justify-start"><Loader2 size={14} className="animate-spin text-indigo-500" /></div>}
+            <div className="flex-1 bg-white border rounded-3xl p-4 shadow-inner overflow-y-auto space-y-4 font-bold font-bold font-bold">
+              {chatHistory.map((msg, i) => (<div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} font-bold`}><div className={`max-w-[85%] p-3 rounded-2xl text-xs font-bold font-bold ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none shadow-md' : 'bg-slate-100 border text-slate-800 rounded-tl-none font-bold'}`}>{msg.text}</div></div>))}
+              {geminiLoading && <div className="flex justify-start font-bold font-bold"><Loader2 size={14} className="animate-spin text-indigo-500" /></div>}
             </div>
-            <div className="flex gap-2 items-center bg-white p-2 border rounded-2xl shadow-sm"><label className="p-3 bg-slate-100 rounded-xl cursor-pointer hover:bg-slate-200"><Camera size={18} /><input type="file" accept="image/*" onChange={(e) => handleImageUpload(e)} className="hidden" /></label><input value={inputMessage} onChange={(e) => setInputMessage(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && (async () => { const msg = inputMessage; setInputMessage(""); setChatHistory(p => [...p, { role: 'user', text: msg }]); const res = await callGemini(msg); setChatHistory(p => [...p, { role: 'model', text: res }]); })()} placeholder="Ta question ?" className="flex-1 outline-none text-xs font-bold px-2" /><button onClick={async () => { const msg = inputMessage; setInputMessage(""); setChatHistory(p => [...p, { role: 'user', text: msg }]); const res = await callGemini(msg); setChatHistory(p => [...p, { role: 'model', text: res }]); }} className="p-3 bg-indigo-600 text-white rounded-xl shadow-md"><ChevronRight size={18} /></button></div>
+            <div className="flex gap-2 items-center bg-white p-2 border rounded-2xl shadow-sm font-bold font-bold font-bold font-bold"><input value={inputMessage} onChange={(e) => setInputMessage(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && handleCoachChat()} placeholder="Ta question ?" className="flex-1 outline-none text-xs font-bold px-2 font-bold font-bold" /><button onClick={handleCoachChat} className="p-3 bg-indigo-600 text-white rounded-xl shadow-md font-bold font-bold font-bold"><ChevronRight size={18} /></button></div>
           </div>
         )}
 
         {activeTab === 'profile' && (
-          <div className="space-y-6 animate-in zoom-in-95">
-            <h2 className="text-lg font-black uppercase flex items-center gap-2"><Settings size={20} className="text-indigo-600" /> Profil</h2>
-            <div className="bg-white border rounded-3xl p-6 shadow-sm space-y-4 font-bold">
+          <div className="space-y-6 animate-in zoom-in-95 font-bold">
+            <h2 className="text-lg font-black uppercase flex items-center gap-2"><Settings size={20} className="text-indigo-600" /> Profil Personnel</h2>
+            <div className="bg-white border rounded-3xl p-6 shadow-sm space-y-5">
               <div className="grid grid-cols-2 gap-4">
-                <div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Kcal / Jour</label><input type="number" value={profile.maxCalories} onChange={(e) => setProfile({...profile, maxCalories: e.target.value})} className="bg-transparent font-black text-xl text-red-600 outline-none w-full" /></div>
+                <div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Sexe</label>
+                  <select value={profile.gender} onChange={(e) => setProfile({...profile, gender: e.target.value})} className="bg-transparent font-black text-sm text-slate-700 outline-none w-full border-none">
+                    <option value="Homme">Homme</option>
+                    <option value="Femme">Femme</option>
+                  </select>
+                </div>
                 <div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Âge</label><input type="number" value={profile.age} onChange={(e) => setProfile({...profile, age: e.target.value})} className="bg-transparent font-black text-xl text-slate-700 outline-none w-full" /></div>
               </div>
-              <div className="grid grid-cols-2 gap-4 pt-2">
+              <div className="grid grid-cols-2 gap-4">
                 <div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Actuel (kg)</label><input type="number" value={profile.weight} onChange={(e) => setProfile({...profile, weight: e.target.value})} className="bg-transparent font-black text-xl text-indigo-600 outline-none w-full" /></div>
                 <div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Taille (cm)</label><input type="number" value={profile.height} onChange={(e) => setProfile({...profile, height: e.target.value})} className="bg-transparent font-black text-xl text-slate-700 outline-none w-full" /></div>
               </div>
+              <div className="bg-slate-50 p-3 rounded-2xl border"><label className="text-[8px] font-black text-slate-400 uppercase block mb-1">Niveau d'activité</label>
+                <select value={profile.activityLevel} onChange={(e) => setProfile({...profile, activityLevel: e.target.value})} className="bg-transparent font-black text-sm text-slate-700 outline-none w-full border-none">
+                  <option value="Sédentaire">Sédentaire (Bureau)</option>
+                  <option value="Modéré">Modéré (Sport 1-2 fois/sem)</option>
+                  <option value="Actif">Actif (Sport 3-5 fois/sem)</option>
+                  <option value="Sportif">Intense (Sport quotidien)</option>
+                </select>
+              </div>
+
+              {/* SECTION CALCUL IA */}
+              <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-3xl space-y-3">
+                <div className="flex justify-between items-center"><span className="text-[9px] font-black text-indigo-400 uppercase italic">Assistant Nutrition IA</span><Zap size={14} className="text-indigo-400" /></div>
+                <button onClick={calculateIA} disabled={calculatingIA} className="w-full py-3 bg-white border-2 border-indigo-200 text-indigo-600 rounded-2xl text-xs font-black uppercase flex items-center justify-center gap-2 hover:bg-indigo-600 hover:text-white transition-all shadow-sm">
+                  {calculatingIA ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}
+                  Calculer mes objectifs avec l'IA
+                </button>
+                {iaMessage && <p className="text-[10px] text-indigo-700 text-center font-bold">{iaMessage}</p>}
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 pt-2">
+                <div className="bg-red-50 p-3 rounded-2xl border border-red-100"><label className="text-[8px] font-black text-red-400 uppercase block mb-1">Limite Calories</label><input type="number" value={profile.maxCalories} onChange={(e) => setProfile({...profile, maxCalories: e.target.value})} className="bg-transparent font-black text-xl text-red-600 outline-none w-full" /></div>
+                <div className="bg-emerald-50 p-3 rounded-2xl border border-emerald-100"><label className="text-[8px] font-black text-emerald-400 uppercase block mb-1">Objectif (kg)</label><input type="number" value={profile.targetWeight} onChange={(e) => setProfile({...profile, targetWeight: e.target.value})} className="bg-transparent font-black text-xl text-emerald-600 outline-none w-full" /></div>
+              </div>
+
               <button onClick={async () => {
                 const weightVal = parseFloat(profile.weight);
                 const updated = { ...profile, weight: weightVal, height: parseFloat(profile.height), age: parseInt(profile.age), targetWeight: parseFloat(profile.targetWeight), maxCalories: parseInt(profile.maxCalories), initialWeight: profile.initialWeight === 0 ? weightVal : profile.initialWeight };
                 await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'main'), updated);
                 await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'weightLogs', currentDate), { weight: weightVal });
                 setActiveTab('dashboard');
-              }} className="w-full py-4 mt-2 bg-indigo-600 text-white rounded-3xl font-black uppercase tracking-widest text-xs shadow-lg active:scale-95 transition-all">Enregistrer le Profil</button>
+              }} className="w-full py-4 mt-2 bg-indigo-600 text-white rounded-3xl font-black uppercase tracking-widest text-xs shadow-lg">Sauvegarder le Profil</button>
             </div>
           </div>
         )}
 
         <footer className="mt-8 mb-4 text-center">
-          <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.2em] italic opacity-50">
+          <p className="text-[10px] font-black text-slate-300 uppercase tracking-[0.2em] italic opacity-50 font-bold font-bold font-bold">
             © Sandeep-Singh NIRMAL 2026
           </p>
         </footer>
       </main>
 
-      <nav className={`fixed bottom-0 left-0 right-0 border-t px-6 py-4 flex justify-between items-end z-40 transition-colors duration-500 shadow-[0_-8px_20px_rgba(0,0,0,0.05)] ${caloriePercent >= 100 ? 'bg-red-50 border-red-100' : 'bg-white border-slate-100'}`}>
-        <button onClick={() => setActiveTab('dashboard')} className={`flex flex-col items-center gap-1 flex-1 ${activeTab === 'dashboard' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><Utensils size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase">Journal</span></button>
-        <button onClick={() => setActiveTab('analyse')} className={`flex flex-col items-center gap-1 flex-1 ${activeTab === 'analyse' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><ChartIcon size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase">Analyse</span></button>
-        <div className="flex-1 flex justify-center pb-2"><label className={`flex items-center justify-center w-14 h-14 rounded-2xl shadow-xl cursor-pointer active:scale-90 transition-all ring-4 ring-white ${caloriePercent >= 100 ? 'bg-red-600' : 'bg-indigo-600'} text-white`}><Camera size={26} /><input type="file" accept="image/*" onChange={(e) => handleImageUpload(e)} className="hidden" /></label></div>
-        <button onClick={() => setActiveTab('guide')} className={`flex flex-col items-center gap-1 flex-1 ${activeTab === 'guide' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><Search size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase">Guide</span></button>
-        <button onClick={() => setActiveTab('gemini')} className={`flex flex-col items-center gap-1 flex-1 ${activeTab === 'gemini' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><MessageSquare size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase">Coach</span></button>
+      <nav className={`fixed bottom-0 left-0 right-0 border-t px-6 py-4 flex justify-between items-end z-40 transition-colors duration-500 shadow-[0_-8px_20px_rgba(0,0,0,0.05)] font-bold ${caloriePercent >= 100 ? 'bg-red-50 border-red-100' : 'bg-white border-slate-100'}`}>
+        <button onClick={() => setActiveTab('dashboard')} className={`flex flex-col items-center gap-1 flex-1 font-bold font-bold ${activeTab === 'dashboard' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><Utensils size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase font-bold">Journal</span></button>
+        <button onClick={() => setActiveTab('analyse')} className={`flex flex-col items-center gap-1 flex-1 font-bold font-bold ${activeTab === 'analyse' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><ChartIcon size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase font-bold">Analyse</span></button>
+        <div className="flex-1 flex justify-center pb-2 font-bold font-bold font-bold"><label className={`flex items-center justify-center w-14 h-14 rounded-2xl shadow-xl cursor-pointer active:scale-90 transition-all ring-4 ring-white font-bold font-bold font-bold ${caloriePercent >= 100 ? 'bg-red-600' : 'bg-indigo-600'} text-white font-bold`}><Camera size={26} /><input type="file" accept="image/*" className="hidden font-bold" /></label></div>
+        <button onClick={() => setActiveTab('guide')} className={`flex flex-col items-center gap-1 flex-1 font-bold font-bold ${activeTab === 'guide' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><Search size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase font-bold">Guide</span></button>
+        <button onClick={() => setActiveTab('gemini')} className={`flex flex-col items-center gap-1 flex-1 font-bold font-bold ${activeTab === 'gemini' ? (caloriePercent >= 100 ? 'text-red-600' : 'text-indigo-600') : 'text-slate-400'}`}><MessageSquare size={22} strokeWidth={3} /><span className="text-[8px] font-black uppercase font-bold">Coach</span></button>
       </nav>
 
       {showAddModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-6"><div className="bg-white w-full max-w-xs rounded-3xl p-6 shadow-2xl space-y-4 animate-in zoom-in-95 font-bold"><div className="flex justify-between items-center"><h3 className="font-black text-sm uppercase text-slate-800">Ajouter au {showAddModal}</h3><button onClick={() => setShowAddModal(null)} className="text-slate-300"><X size={20} /></button></div><div className="space-y-4"><input id="foodName" type="text" placeholder="Ex: Poulet grillé" className="w-full bg-slate-50 border rounded-2xl p-4 text-xs font-bold outline-none" /><input id="foodCals" type="number" placeholder="Kcal" className="w-full bg-slate-50 border rounded-2xl p-4 text-xs font-bold outline-none" /><button onClick={() => {const n=document.getElementById('foodName').value; const c=document.getElementById('foodCals').value; if(n&&c) addFoodItem(showAddModal,n,c);}} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase text-xs shadow-md">Ajouter</button></div></div></div>
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-6 font-bold"><div className="bg-white w-full max-w-xs rounded-3xl p-6 shadow-2xl space-y-4 animate-in zoom-in-95 font-bold font-bold font-bold"><div className="flex justify-between items-center font-bold"><h3 className="font-black text-sm uppercase text-slate-800 font-bold font-bold">Ajouter au {showAddModal}</h3><button onClick={() => setShowAddModal(null)} className="text-slate-300 font-bold"><X size={20} /></button></div><div className="space-y-4 font-bold"><input id="foodName" type="text" placeholder="Ex: Poulet grillé" className="w-full bg-slate-50 border rounded-2xl p-4 text-xs font-bold outline-none font-bold" /><input id="foodCals" type="number" placeholder="Kcal" className="w-full bg-slate-50 border rounded-2xl p-4 text-xs font-bold outline-none font-bold" /><button onClick={() => {const n=document.getElementById('foodName').value; const c=document.getElementById('foodCals').value; if(n&&c) addFoodItem(showAddModal,n,c);}} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase text-xs shadow-md font-bold">Ajouter</button></div></div></div>
       )}
     </div>
   );
